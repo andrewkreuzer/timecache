@@ -1,0 +1,46 @@
+version: '3'
+services:
+  gcache1:
+    hostname: gcache1
+    build:
+      context: .
+    networks:
+      - cache
+
+  gcache2:
+    hostname: gcache2
+    build:
+      context: .
+    networks:
+      - cache
+
+  gcache3:
+    hostname: gcache3
+    build:
+      context: .
+    networks:
+      - cache
+
+  gcache4:
+    hostname: gcache4
+    build:
+      context: .
+    networks:
+      - cache
+
+  gcache5:
+    hostname: gcache5
+    build:
+      context: .
+    networks:
+      - cache
+
+  gcache6:
+    hostname: gcache6
+    build:
+      context: .
+    networks:
+      - cache
+
+networks:
+  cache:

@@ -1,0 +1,31 @@
+syntax = "proto3";
+package tutorial;
+
+option go_package = "gcache/deploymentpb";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+
+message UUID {
+  string value = 1;
+}
+
+message Deployment {
+  string name = 1;
+  UUID UUID = 2;
+  string environment = 3;
+  google.protobuf.Duration duration = 4;
+  google.protobuf.Timestamp created_at = 5;
+
+  enum Status {
+    STARTED = 0;
+    SUCCEEDED = 1;
+    FAILED = 2;
+  }
+
+  Status status = 6;
+}
+
+message Deployments {
+  repeated Deployment deployments = 1;
+}
