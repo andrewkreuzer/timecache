@@ -1,194 +1,152 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"gocache/deploymentpb"
-	"math/rand"
-	"net/http"
-	"os"
-	"strconv"
-	"strings"
+	"log"
+
+	// "os"
+	// "runtime"
+	// "runtime/pprof"
+
 	"time"
 
-	gc "github.com/golang/groupcache"
+	"google.golang.org/protobuf/proto"
 	durationpb "google.golang.org/protobuf/types/known/durationpb"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 )
 
-var (
-	group *gc.Group
-
-	peerAddrs = []string{"gcache1:8080", "gcache2:8080", "gcache3:8080", "gcache4:8080", "gcache5:8080", "gcache6:8080"}
-)
-
-const (
-	deploymentGroup = "deployment-group"
-	cacheSize       = 1 << 20
-)
-
 func main() {
-	hostname, err := os.Hostname()
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
-	}
+	// cf, err := os.Create("cache-cpu.prof")
+	// if err != nil {
+	// 	log.Fatal("could not create CPU profile: ", err)
+	// }
+	// defer cf.Close() // error handling omitted for example
+	// if err := pprof.StartCPUProfile(cf); err != nil {
+	// 	log.Fatal("could not start CPU profile: ", err)
+	// }
+	// defer pprof.StopCPUProfile()
 
-	if hostname == "gcache1" {
-		time.Sleep(1 * time.Second)
-	}
-
-	name := hostname + ":8080"
-	pool := gc.NewHTTPPool("http://" + name)
-	pool.Set(addrToURL(peerAddrs)...)
-
+	log.Println("memory: ", getSystemMemory()/(1024*1024*1024), "GB")
+	timer := getTimer()
 	t := time.Now()
-	tPast := t.Add(-24 * time.Hour)
-	testSpace := [2]int64{t.UnixNano(), tPast.UnixNano()}
-	testKeys := genTestKeys(testSpace)
-	deployments := genDeployments(testKeys)
-	cachedKeys := make(map[string][2]int64)
 
-	go http.ListenAndServe(name, pool)
-
-	getter := gc.GetterFunc(func(_ context.Context, key string, dest gc.Sink) error {
-		sleepOnSize(key)
-
-		left, err := strconv.ParseInt(strings.Split(key, ":")[0], 10, 64)
-		right, err := strconv.ParseInt(strings.Split(key, ":")[1], 10, 64)
-		if err != nil {
-			return err
-		}
-
-		cachedKeys[key] = [2]int64{left, right}
-		return dest.SetProto(
-			&deploymentpb.Deployments{
-				Deployments: deployments,
-			},
-		)
-	})
-
-	group = gc.NewGroup(deploymentGroup, cacheSize, getter)
-
-	for range deployments {
-		l := rand.Int63n(t.UnixNano()-tPast.UnixNano()) + tPast.UnixNano()
-		r := rand.Int63n(l-tPast.UnixNano()) + tPast.UnixNano()
-
-		key := fmt.Sprintf("%d:%d", l, r)
-
-		var t time.Time
-		var d deploymentpb.Deployments
-		switch hostname {
-		case "gcache1":
-			time.Sleep(500 * time.Millisecond)
-			t = time.Now()
-			group.Get(context.Background(), key, gc.ProtoSink(&d))
-		case "gcache2":
-			time.Sleep(750 * time.Millisecond)
-			t = time.Now()
-			group.Get(context.Background(), key, gc.ProtoSink(&d))
-		case "gcache3":
-			time.Sleep(1 * time.Second)
-			t = time.Now()
-			group.Get(context.Background(), key, gc.ProtoSink(&d))
-		default:
-			t = time.Now()
-			group.Get(context.Background(), key, gc.ProtoSink(&d))
-		}
-
-		mainCache := group.CacheStats(gc.MainCache)
-		hotCache := group.CacheStats(gc.HotCache)
-
-		t2 := time.Now()
-		report := struct {
-			K   string
-			T   time.Duration
-			Mcg int64
-			Mch int64
-			Hcg int64
-			Hch int64
-		}{
-			time.Duration(l - r).Truncate(time.Minute).String(),
-			t2.Sub(t),
-			mainCache.Gets,
-			mainCache.Hits,
-			hotCache.Gets,
-			hotCache.Hits,
-		}
-
-		fmt.Printf("%+v\n", report)
+	cacheConfig := &CacheConfig[string, []byte, *deploymentpb.Deployment]{
+		MaxMemory:    "1MB",
+		MaxEntries:   1000,
+		BlockSize:    "100KB",
+		BlockManager: &DefaultBlockManager{},
 	}
-}
+	cache := cacheConfig.NewCache()
 
-func checkCache(key string, cachedKeys map[string][2]int64) ([]string, bool) {
-	left, right := parseKey(key)
-	keys := make([]string, 0)
-	for k, r := range cachedKeys {
-		if r[0] >= left && r[1] <= right {
-			keys = append(keys, k)
-		}
+	log.Println("size (empty): ", cache.Size())
+	log.Println("len (empty): ", cache.Len())
+
+	tstart := t.Add(23 * time.Hour)
+	for i := 0; i < 1_000_000; i++ {
+		key := tstart.Add(time.Duration(i) * time.Minute)
+		deployment := genDeployment(genRowKey(key))
+		// calculate the size if it where to be marshalled
+		size := calculateSize(&deployment)
+		cache.Add(key, &deployment, size)
 	}
 
-	return keys, len(keys) > 0
+	timer.total = time.Since(t)
+
+	time.Sleep(1 * time.Second)
+	log.Println("size: ", cache.Size()/1000, "KB")
+	log.Println("len: ", cache.Len())
+	latest, ok := cache.Newest()
+	if !ok {
+		log.Println("Failed to get latest deployments from cache")
+	} else {
+		var deps deploymentpb.Deployments
+		proto.Unmarshal(latest.value, &deps)
+		log.Printf("latest deployments %s: %d", latest.key, len(deps.Deployments))
+	}
+	log.Printf("active block len: %d", len(cache.Active().values))
+
+	for i := 0; i < 10000; i++ {
+		cache.Newest()
+	}
+
+	for i := 0; i < 100; i++ {
+		fetchParsingEachBlock(cache, tstart)
+	}
+
+	for i := 0; i < 100; i++ {
+		fetchParsingCombinedBlocks(cache, tstart)
+	}
+
+	timer.getStats()
+	cache.Stats()
+
+	// runtime.GC()
+	// mf, err := os.Create("cache-mem-postgc.prof")
+	// if err != nil {
+	// 	log.Fatal("could not create memory profile: ", err)
+	// }
+	// defer mf.Close() // error handling omitted for example
+	// if err := pprof.WriteHeapProfile(mf); err != nil {
+	// 	log.Fatal("could not write memory profile: ", err)
+	// }
+
 }
 
-func genDeployments(keys []string) []*deploymentpb.Deployment {
-	deployments := make([]*deploymentpb.Deployment, len(keys))
-	for _, key := range keys {
-		left, err := strconv.ParseInt(strings.Split(key, ":")[0], 10, 64)
-		right, err := strconv.ParseInt(strings.Split(key, ":")[1], 10, 64)
-		if err != nil {
-			fmt.Println(err)
-		}
+// combining all the blocks into one and then parsing it
+// seems to be significantly slower than parsing each block
+// protobuf is better suited to parsing small messages
+func fetchParsingCombinedBlocks(cache CacheInterface[string, []byte, *deploymentpb.Deployment], tstart time.Time) *deploymentpb.Deployments {
+	defer getTimer().timer("fetchParsingCombinedBlocks")()
+	key := genCacheKey(tstart, tstart.Add(-48*time.Hour))
+	fetchRequests := cache.Fetch(key)
+	var deployments []byte
+	for _, req := range fetchRequests {
+		deployments = append(deployments, req...)
+	}
 
-		k := rand.Int63n(left-right) + right
-		deployments = append(deployments, &deploymentpb.Deployment{
-			Name:        fmt.Sprintf("%d", k),
-			UUID:        &deploymentpb.UUID{Value: "1234567890"},
-			Environment: "test",
-			Duration:    durationpb.New(1 * time.Minute),
-			CreatedAt:   timestamppb.New(time.Now()),
-			Status:      deploymentpb.Deployment_STARTED,
-		})
+	var deps deploymentpb.Deployments
+	proto.Unmarshal(deployments, &deps)
+
+	return &deps
+}
+
+func fetchParsingEachBlock(cache CacheInterface[string, []byte, *deploymentpb.Deployment], tstart time.Time) []*deploymentpb.Deployment {
+	defer getTimer().timer("fetchParsingEachBlock")()
+	key := genCacheKey(tstart, tstart.Add(-48*time.Hour))
+	fetchRequests := cache.Fetch(key)
+	var deployments []*deploymentpb.Deployment
+	for _, req := range fetchRequests {
+		var deps deploymentpb.Deployments
+		proto.Unmarshal(req, &deps)
+		deployments = append(deployments, deps.Deployments...)
 	}
 
 	return deployments
 }
 
-func parseKey(key string) (int64, int64) {
-	left, err := strconv.ParseInt(strings.Split(key, ":")[0], 10, 64)
-	right, err := strconv.ParseInt(strings.Split(key, ":")[1], 10, 64)
-	if err != nil {
-		fmt.Println(err)
-	}
-	return left, right
+func genCacheKey(tstart, tend time.Time) string {
+	keystart := ^uint64(0) - uint64(tstart.UnixNano())
+	keyend := ^uint64(0) - uint64(tend.UnixNano())
+	return fmt.Sprintf("%017d:%017d", keyend, keystart)
 }
 
-func genTestKeys(keyEnds [2]int64) []string {
-	keys := make([]string, 0)
-	for len(keys) < 1000 {
-		left := rand.Int63n(keyEnds[0]) + keyEnds[1]
-		right := rand.Int63n(left-keyEnds[1]) + keyEnds[1]
-
-		if right < left && left-right > 0 {
-			keys = append(keys, fmt.Sprintf("%d:%d", left, right))
-		}
-
+func genDeployment(key string) deploymentpb.Deployment {
+	return deploymentpb.Deployment{
+		RowKey:      key,
+		Name:        "test",
+		UUID:        &deploymentpb.UUID{Value: "1234567890"},
+		Environment: "test",
+		Duration:    durationpb.New(1 * time.Minute),
+		CreatedAt:   timestamppb.New(time.Now()),
+		Status:      deploymentpb.Deployment_STARTED,
 	}
-
-	return keys
 }
 
-func sleepOnSize(key string) {
-	left, right := parseKey(key)
-	d := time.Duration(left-right) / 100000
-	time.Sleep(d)
+func genRowKey(t time.Time) string {
+	return fmt.Sprintf("%d", ^uint64(0)-uint64(t.UnixNano()))
 }
 
-func addrToURL(addr []string) []string {
-	url := make([]string, len(addr))
-	for i := range addr {
-		url[i] = "http://" + addr[i]
-	}
-	return url
+func calculateSize(deployment proto.Message) int64 {
+	return int64(proto.Size(deployment))
 }

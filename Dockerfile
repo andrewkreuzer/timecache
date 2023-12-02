@@ -12,8 +12,8 @@ FROM alpine:latest
 WORKDIR /app
 COPY --from=builder /app/gcache .
 
-RUN adduser -u 1001 -g 1001 -D gcache
-USER gcache
+# RUN adduser -u 1001 -g 1001 -D gcache
+# USER gcache
 
 EXPOSE 8080
 CMD ["./gcache"]

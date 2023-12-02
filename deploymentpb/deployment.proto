@@ -11,11 +11,12 @@ message UUID {
 }
 
 message Deployment {
-  string name = 1;
-  UUID UUID = 2;
-  string environment = 3;
-  google.protobuf.Duration duration = 4;
-  google.protobuf.Timestamp created_at = 5;
+  string rowKey = 1;
+  string name = 2;
+  UUID UUID = 3;
+  string environment = 4;
+  google.protobuf.Duration duration = 5;
+  google.protobuf.Timestamp created_at = 6;
 
   enum Status {
     STARTED = 0;
@@ -23,7 +24,7 @@ message Deployment {
     FAILED = 2;
   }
 
-  Status status = 6;
+  Status status = 7;
 }
 
 message Deployments {
