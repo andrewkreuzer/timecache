@@ -5,33 +5,23 @@ import "C"
 
 import (
 	"container/list"
-	"fmt"
 	"log"
-	"strconv"
 	"sync"
 	"time"
+
+	"google.golang.org/protobuf/proto"
 )
 
-type CacheInterface[K comparable, V any, A any] interface {
-	Active() *activeBlock[A]
-	Get(key K) (*V, bool)
-	Add(createdAt time.Time, value A, size int64) error
-	Remove(key K)
-	Newest() (*Block[K, V], bool)
-	Fetch(key string) []V
-	Size() int64
-	Len() int
-	Stats()
+type blockType interface {
+	string | []byte
 }
 
-type CacheConfig[K comparable, V any, A any] struct {
-	MaxMemory    string
-	MaxEntries   int
-	BlockSize    string
-	BlockManager BlockManager[K, V, A]
+type Key interface {
+	GenerateKey() string
+	ParseKey(string) (time.Time, time.Time)
 }
 
-type Cache[K comparable, V any, A any] struct {
+type Cache[K comparable, V blockType, A proto.Message] struct {
 	maxMemoryBytes int64
 	maxEntries     int
 	blockSize      int64
@@ -61,11 +51,13 @@ func getSystemMemory() uint64 {
 	return uint64(C.sysconf(C._SC_PHYS_PAGES) * C.sysconf(C._SC_PAGE_SIZE))
 }
 
-func (cc *CacheConfig[K, V, A]) NewCache() CacheInterface[K, V, A] {
+func (cc *CacheConfig[K, V, A]) NewCache() *Cache[K, V, A] {
 	return NewTypedCache[K, V, A](cc)
 }
 
-func NewTypedCache[K comparable, V any, A any](cfg *CacheConfig[K, V, A]) *Cache[K, V, A] {
+func NewTypedCache[K comparable, V blockType, A proto.Message](
+	cfg *CacheConfig[K, V, A],
+) *Cache[K, V, A] {
 
 	if cfg.MaxMemory != "" {
 		bytes, err := convertToBytes(cfg.MaxMemory)
@@ -111,10 +103,13 @@ func (c *Cache[K, V, A]) Active() *activeBlock[A] {
 	return c.activeBlock
 }
 
+func (c *Cache[K, V, A]) ActiveLen() int {
+	return len(c.activeBlock.values)
+}
+
 func (c *Cache[K, V, A]) Fetch(key string) []V {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
-	defer getTimer().timer("fetch")()
 	var values []V
 	for e := c.ll.Front(); e != nil; e = e.Next() {
 		values = append(values, e.Value.(*Block[K, V]).value)
@@ -124,33 +119,33 @@ func (c *Cache[K, V, A]) Fetch(key string) []V {
 }
 
 func (c *Cache[K, V, A]) Keys() []K {
-	var keys []K
+	keys := make([]K, 0, len(c.entries))
 	for key := range c.entries {
 		keys = append(keys, key)
 	}
 	return keys
 }
 
-func (c *Cache[K, V, A]) Get(key K) (*V, bool) {
+func (c *Cache[K, V, A]) Get(key K) (value *V, cacheHit bool) {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
 
-	element, ok := c.entries[key]
-	if ok {
+	var element *list.Element
+	element, cacheHit = c.entries[key]
+	if cacheHit {
 		c.stats.cacheHits++
-		entity := element.Value.(*Block[K, V])
-		return &entity.value, true
+		value = &element.Value.(*Block[K, V]).value
+		return
 	}
 
 	c.stats.cacheMisses++
-	return nil, false
+	return
 }
 
 func (c *Cache[K, V, A]) Newest() (*Block[K, V], bool) {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
 
-	defer getTimer().timer("newest")()
 	elmt := c.ll.Front()
 	if elmt != nil {
 		c.stats.cacheHits++
@@ -160,17 +155,13 @@ func (c *Cache[K, V, A]) Newest() (*Block[K, V], bool) {
 	return nil, false
 }
 
-func (c *Cache[K, V, A]) Add(createdAt time.Time, value A, size int64) error {
-	c.lock.Lock()
-	defer c.lock.Unlock()
-
-	defer getTimer().timer("add")()
+func (c *Cache[K, V, A]) Add(createdAt time.Time, value A, size int64) {
 	if c.activeBlock.size+size > c.blockSize {
-		blockValue, blockSize := c.blockManager.CreateValue(c.activeBlock.values)
-		go c.put(
+		block := c.blockManager.CreateBlock(c.activeBlock.values)
+		c.put(
 			c.blockManager.CreateKey(c.activeBlock.first, c.activeBlock.last),
-			blockValue,
-			blockSize,
+			block,
+			int64(len(block)),
 		)
 		c.activeBlock = &activeBlock[A]{
 			first:  createdAt,
@@ -178,36 +169,29 @@ func (c *Cache[K, V, A]) Add(createdAt time.Time, value A, size int64) error {
 			values: []A{value},
 			size:   size,
 		}
-		return nil
 	}
 
 	c.activeBlock.last = createdAt
 	c.activeBlock.values = append(c.activeBlock.values, value)
 	c.activeBlock.size += size
 
-	return nil
+	return
 }
 
-func (c *Cache[K, V, A]) put(key K, value V, size int64) error {
-	c.lock.Lock()
-	defer c.lock.Unlock()
-
-	defer getTimer().timer("put")()
-
-	if c.maxEntries != 0 && c.ll.Len() >= c.maxEntries {
-		go c.RemoveOldest()
-	}
-
-	if c.size+size > c.maxMemoryBytes {
-		go c.RemoveOldest()
-	}
-
+func (c *Cache[K, V, A]) put(key K, value V, size int64) {
 	entity := NewBlock[K, V](key, value, size)
 	c.entries[key] = c.ll.PushFront(entity)
 
 	c.stats.blocksAdded++
 	c.size += int64(entity.size)
-	return nil
+
+	for {
+		if c.ll.Len() < c.maxEntries && c.size+size < c.maxMemoryBytes {
+			return
+		}
+
+		c.RemoveOldest()
+	}
 }
 
 func (c *Cache[K, V, A]) Clear() {
@@ -231,7 +215,6 @@ func (c *Cache[K, V, A]) Remove(key K) {
 func (c *Cache[K, V, A]) RemoveOldest() {
 	c.lock.Lock()
 	defer c.lock.Unlock()
-	defer getTimer().timer("removeOldest")()
 	elmt := c.ll.Back()
 	if elmt != nil {
 		c.ll.Remove(elmt)
@@ -239,10 +222,6 @@ func (c *Cache[K, V, A]) RemoveOldest() {
 		s := elmt.Value.(*Block[K, V]).size
 		c.size -= int64(s)
 	}
-}
-
-func (c *Cache[K, V, A]) ActiveLen() int {
-	return len(c.activeBlock.values)
 }
 
 func (c *Cache[K, V, A]) Len() int {
@@ -275,67 +254,4 @@ type Stats struct {
 
 func (c *Cache[K, V, A]) Stats() {
 	log.Printf("Cache hits: %d, misses: %d, blocks: %d", c.stats.cacheHits, c.stats.cacheMisses, c.stats.blocksAdded)
-}
-
-func convertToBytes(size string) (int64, error) {
-	size, unit := parseSize(size)
-	switch unit {
-	case "":
-		s, err := strconv.ParseInt(size, 10, 64)
-		if err != nil {
-			return 0, err
-		}
-		return s, nil
-	case "KiB":
-		s, err := strconv.ParseInt(size, 10, 64)
-		if err != nil {
-			return 0, err
-		}
-		return s * 1024, nil
-	case "KB":
-		s, err := strconv.ParseInt(size, 10, 64)
-		if err != nil {
-			return 0, err
-		}
-		return s * 1000, nil
-	case "MiB":
-		s, err := strconv.ParseInt(size, 10, 64)
-		if err != nil {
-			return 0, err
-		}
-		return s * 1024 * 1024, nil
-	case "MB":
-		s, err := strconv.ParseInt(size, 10, 64)
-		if err != nil {
-			return 0, err
-		}
-		return s * 1000 * 1000, nil
-	case "GB":
-		s, err := strconv.ParseInt(size, 10, 64)
-		if err != nil {
-			return 0, err
-		}
-		return s * 1000 * 1000 * 1000, nil
-	case "GiB":
-		s, err := strconv.ParseInt(size, 10, 64)
-		if err != nil {
-			return 0, err
-		}
-		return s * 1024 * 1024 * 1024, nil
-	default:
-		return 0, fmt.Errorf("unknown unit")
-	}
-}
-
-func parseSize(size string) (string, string) {
-	var unit string
-	var s string
-	for i := len(size) - 1; i >= 0; i-- {
-		if size[i] <= '9' {
-			unit = size[i+1:]
-			s = size[:i+1]
-			break
-		}
-	}
-	return s, unit
 }

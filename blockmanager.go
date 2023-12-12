@@ -12,7 +12,7 @@ import (
 
 type BlockManager[K comparable, V any, A any] interface {
 	CreateKey(time.Time, time.Time) K
-	CreateValue([]A) (V, int64)
+	CreateBlock([]A) V
 	ParseKey(K) (time.Time, time.Time)
 	CalculateBlockSize([]A) int64
 }
@@ -34,16 +34,15 @@ func (m *DefaultBlockManager) ParseKey(key string) (time.Time, time.Time) {
 	return t, t
 }
 
-func (m *DefaultBlockManager) CreateValue(
+func (m *DefaultBlockManager) CreateBlock(
 	values []*deploymentpb.Deployment,
-) ([]byte, int64) {
-	defer getTimer().timer("valueCreateFuncFull")()
+) []byte {
 	deployments := &deploymentpb.Deployments{Deployments: values}
 	deps, err := proto.Marshal(deployments)
 	if err != nil {
 		log.Fatalln("Failed to encode deployment:", err)
 	}
-	return deps, calculateSize(deployments)
+	return deps
 }
 
 func (m *DefaultBlockManager) CalculateBlockSize(

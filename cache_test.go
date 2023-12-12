@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type TestBlockManager struct{}
@@ -28,16 +30,15 @@ func (dbm TestBlockManager) ParseKey(key string) (time.Time, time.Time) {
 	return t, t
 }
 
-func (dbm TestBlockManager) CreateValue(
+func (dbm TestBlockManager) CreateBlock(
 	values []*deploymentpb.Deployment,
-) ([]byte, int64) {
-	defer getTimer().timer("valueCreateFuncFull")()
+) []byte {
 	deployments := &deploymentpb.Deployments{Deployments: values}
 	deps, err := proto.Marshal(deployments)
 	if err != nil {
 		log.Fatalln("Failed to encode deployment:", err)
 	}
-	return deps, calculateSize(deployments)
+	return deps
 }
 
 func (dbm TestBlockManager) CalculateBlockSize(
@@ -57,11 +58,42 @@ func setup() *Cache[string, []byte, *deploymentpb.Deployment] {
 	return NewTypedCache[string, []byte, *deploymentpb.Deployment](cacheConfig)
 }
 
+func put(n int, cache *Cache[string, []byte, *deploymentpb.Deployment]) (key string, size int64) {
+	tstart := time.Now()
+	var tend time.Time
+	var deployments deploymentpb.Deployments
+	for j := 0; j < n; j++ {
+		t := tstart.Add(time.Duration(j*30) * time.Second)
+		deployment := genDeployment(genRowKey(t))
+		deployments.Deployments = append(deployments.Deployments, &deployment)
+		tend = t
+	}
+	size = int64(proto.Size(&deployments))
+	out, _ := proto.Marshal(&deployments)
+	key = genCacheKey(tstart, tend)
+	cache.put(key, out, size)
+	return
+}
+
+func add(n int, cache *Cache[string, []byte, *deploymentpb.Deployment]) int64 {
+	tstart := time.Now()
+	var tsize int64
+	for j := 0; j < n; j++ {
+		tkey := tstart.Add(time.Duration(-j*30) * time.Second)
+		deployment := genDeployment(genRowKey(tkey))
+		size := int64(proto.Size(&deployment))
+		tsize += size
+		cache.Add(tkey, &deployment, size)
+	}
+
+	return tsize
+}
+
 func TestAdd1(t *testing.T) {
 	cache := setup()
 	tstart := time.Now()
 	deployment := genDeployment(genRowKey(tstart))
-	size := calculateSize(&deployment)
+	size := int64(proto.Size(&deployment))
 	cache.Add(tstart, &deployment, size)
 	if cache.ActiveLen() != 1 {
 		t.Errorf("cache.Len() = %d, want %d", cache.Len(), 1)
@@ -70,15 +102,7 @@ func TestAdd1(t *testing.T) {
 
 func TestCauseBlockCreation(t *testing.T) {
 	cache := setup()
-	tstart := time.Now()
-	for j := 0; j < 16; j++ {
-		tkey := tstart.Add(time.Duration(-j*30) * time.Second)
-		deployment := genDeployment(genRowKey(tkey))
-		size := calculateSize(&deployment)
-		cache.Add(tkey, &deployment, size)
-	}
-	// wait for the put goroutine to finish
-	time.Sleep(10 * time.Microsecond)
+	add(16, cache)
 	if cache.Len() < 1 {
 		t.Errorf("cache.Len() = %d, want %d, active Len %d", cache.Len(), 1, cache.ActiveLen())
 	}
@@ -86,22 +110,7 @@ func TestCauseBlockCreation(t *testing.T) {
 
 func TestPut(t *testing.T) {
 	cache := setup()
-	var tend time.Time
-	tstart := time.Now()
-	var deployments deploymentpb.Deployments
-	for j := 0; j < 10; j++ {
-		key := tstart.Add(time.Duration(j*30) * time.Second)
-		deployment := genDeployment(genRowKey(key))
-		deployments.Deployments = append(deployments.Deployments, &deployment)
-		tend = key
-	}
-	size := calculateSize(&deployments)
-	out, err := proto.Marshal(&deployments)
-	if err != nil {
-		t.Errorf("Failed to encode deployment: %s", err)
-	}
-	key := genCacheKey(tstart, tend)
-	cache.put(key, out, size)
+	put(20, cache)
 	if cache.Len() != 1 {
 		t.Errorf("cache.Len() = %d, want %d", cache.Len(), 1)
 	}
@@ -109,22 +118,7 @@ func TestPut(t *testing.T) {
 
 func TestGet(t *testing.T) {
 	cache := setup()
-	var tend time.Time
-	tstart := time.Now()
-	var deployments deploymentpb.Deployments
-	for j := 0; j < 10; j++ {
-		key := tstart.Add(time.Duration(j*30) * time.Second)
-		deployment := genDeployment(genRowKey(key))
-		deployments.Deployments = append(deployments.Deployments, &deployment)
-		tend = key
-	}
-	size := calculateSize(&deployments)
-	out, err := proto.Marshal(&deployments)
-	if err != nil {
-		t.Errorf("Failed to encode deployment: %s", err)
-	}
-	key := genCacheKey(tstart, tend)
-	cache.put(key, out, size)
+	key, _ := put(10, cache)
 	v, ok := cache.Get(key)
 	if !ok {
 		t.Errorf("cache.Get(%s) = %t, want %t", key, ok, true)
@@ -136,49 +130,101 @@ func TestGet(t *testing.T) {
 	}
 }
 
-func TestCovertToBytes(t *testing.T) {
-	tests := []struct {
-		a    string
-		want int64
-	}{
-		{
-			a:    "100000",
-			want: 100000,
-		},
-		{
-			a:    "100009",
-			want: 100009,
-		},
-		{
-			a:    "1KiB",
-			want: 1024,
-		},
-		{
-			a:    "1KB",
-			want: 1000,
-		},
-		{
-			a:    "1MiB",
-			want: 1048576,
-		},
-		{
-			a:    "1MB",
-			want: 1000000,
-		},
-		{
-			a:    "1GiB",
-			want: 1073741824,
-		},
-		{
-			a:    "1GB",
-			want: 1000000000,
-		},
+func BenchmarkAdd(b *testing.B) {
+	b.ReportAllocs()
+	cache := setup()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		size := add(10, cache)
+		b.SetBytes(size)
 	}
+}
 
-	for _, test := range tests {
-		got, err := convertToBytes(test.a)
-		if err != nil {
-			t.Errorf("convertToBytes(%s) = %d, want %d, error: %s", test.a, got, test.want, err)
-		}
+func BenchmarkAddCauseBlockCreation(b *testing.B) {
+	b.ReportAllocs()
+	cache := setup()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		size := add(50, cache)
+		b.SetBytes(size)
 	}
+}
+
+func BenchmarkGet(b *testing.B) {
+	cache := setup()
+	key, _ := put(100, cache)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		cache.Get(key)
+	}
+}
+
+func BenchmarkPut(b *testing.B) {
+	b.ReportAllocs()
+	cache := setup()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, size := put(30, cache)
+		b.SetBytes(size)
+	}
+}
+
+func BenchmarkFetchParsingCombinedBlocks(b *testing.B) {
+	b.ReportAllocs()
+	cache := setup()
+	put(10, cache)
+	fetchRequests := cache.Fetch("")
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		var deployments []byte
+		for _, req := range fetchRequests {
+			deployments = append(deployments, req...)
+		}
+
+		b.SetBytes(int64(len(deployments)))
+		var deps deploymentpb.Deployments
+		proto.Unmarshal(deployments, &deps)
+	}
+}
+
+func BenchmarkFetchParsingEachBlock(b *testing.B) {
+	b.ReportAllocs()
+	cache := setup()
+	put(10, cache)
+	fetchRequests := cache.Fetch("")
+	var tsize int64
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		var deployments []*deploymentpb.Deployment
+		for _, req := range fetchRequests {
+			var deps deploymentpb.Deployments
+			tsize += int64(len(req))
+			proto.Unmarshal(req, &deps)
+			deployments = append(deployments, deps.Deployments...)
+		}
+		b.SetBytes(tsize)
+		tsize = 0
+	}
+}
+
+func genCacheKey(tstart, tend time.Time) string {
+	keystart := ^uint64(0) - uint64(tstart.UnixNano())
+	keyend := ^uint64(0) - uint64(tend.UnixNano())
+	return fmt.Sprintf("%017d:%017d", keyend, keystart)
+}
+
+func genDeployment(key string) deploymentpb.Deployment {
+	return deploymentpb.Deployment{
+		RowKey:      key,
+		Name:        "test",
+		UUID:        &deploymentpb.UUID{Value: "1234567890"},
+		Environment: "test",
+		Duration:    durationpb.New(1 * time.Minute),
+		CreatedAt:   timestamppb.New(time.Now()),
+		Status:      deploymentpb.Deployment_STARTED,
+	}
+}
+
+func genRowKey(t time.Time) string {
+	return fmt.Sprintf("%d", ^uint64(0)-uint64(t.UnixNano()))
 }
