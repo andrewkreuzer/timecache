@@ -163,12 +163,10 @@ func (c *Cache[K, V, A]) Add(createdAt time.Time, value A, size int64) {
 			block,
 			int64(len(block)),
 		)
-		c.activeBlock = &activeBlock[A]{
-			first:  createdAt,
-			last:   createdAt,
-			values: []A{value},
-			size:   size,
-		}
+		c.activeBlock.first = createdAt
+		c.activeBlock.last = createdAt
+		c.activeBlock.values = []A{value}
+		c.activeBlock.size = size
 	}
 
 	c.activeBlock.last = createdAt

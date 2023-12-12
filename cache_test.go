@@ -13,41 +13,6 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-type TestBlockManager struct{}
-
-func (dbm TestBlockManager) CreateKey(tstart, tend time.Time) string {
-	keystart := ^uint64(0) - uint64(tstart.UnixNano())
-	keyend := ^uint64(0) - uint64(tend.UnixNano())
-	return fmt.Sprintf("%017d:%017d", keyend, keystart)
-}
-
-func (dbm TestBlockManager) ParseKey(key string) (time.Time, time.Time) {
-	k, err := strconv.ParseUint(key, 10, 64)
-	if err != nil {
-		log.Println(err)
-	}
-	t := time.Unix(0, ^int64(k))
-	return t, t
-}
-
-func (dbm TestBlockManager) CreateBlock(
-	values []*deploymentpb.Deployment,
-) []byte {
-	deployments := &deploymentpb.Deployments{Deployments: values}
-	deps, err := proto.Marshal(deployments)
-	if err != nil {
-		log.Fatalln("Failed to encode deployment:", err)
-	}
-	return deps
-}
-
-func (dbm TestBlockManager) CalculateBlockSize(
-	values []*deploymentpb.Deployment,
-) int64 {
-	deployments := &deploymentpb.Deployments{Deployments: values}
-	return int64(proto.Size(deployments))
-}
-
 func setup() *Cache[string, []byte, *deploymentpb.Deployment] {
 	cacheConfig := &CacheConfig[string, []byte, *deploymentpb.Deployment]{
 		MaxMemory:    "5MB",
@@ -58,41 +23,10 @@ func setup() *Cache[string, []byte, *deploymentpb.Deployment] {
 	return NewTypedCache[string, []byte, *deploymentpb.Deployment](cacheConfig)
 }
 
-func put(n int, cache *Cache[string, []byte, *deploymentpb.Deployment]) (key string, size int64) {
-	tstart := time.Now()
-	var tend time.Time
-	var deployments deploymentpb.Deployments
-	for j := 0; j < n; j++ {
-		t := tstart.Add(time.Duration(j*30) * time.Second)
-		deployment := genDeployment(genRowKey(t))
-		deployments.Deployments = append(deployments.Deployments, &deployment)
-		tend = t
-	}
-	size = int64(proto.Size(&deployments))
-	out, _ := proto.Marshal(&deployments)
-	key = genCacheKey(tstart, tend)
-	cache.put(key, out, size)
-	return
-}
-
-func add(n int, cache *Cache[string, []byte, *deploymentpb.Deployment]) int64 {
-	tstart := time.Now()
-	var tsize int64
-	for j := 0; j < n; j++ {
-		tkey := tstart.Add(time.Duration(-j*30) * time.Second)
-		deployment := genDeployment(genRowKey(tkey))
-		size := int64(proto.Size(&deployment))
-		tsize += size
-		cache.Add(tkey, &deployment, size)
-	}
-
-	return tsize
-}
-
 func TestAdd1(t *testing.T) {
 	cache := setup()
 	tstart := time.Now()
-	deployment := genDeployment(genRowKey(tstart))
+	deployment := createDeployment(createRowKey(tstart))
 	size := int64(proto.Size(&deployment))
 	cache.Add(tstart, &deployment, size)
 	if cache.ActiveLen() != 1 {
@@ -131,22 +65,30 @@ func TestGet(t *testing.T) {
 }
 
 func BenchmarkAdd(b *testing.B) {
-	b.ReportAllocs()
 	cache := setup()
+	deps, sizes := genDeps(1)
+	t := time.Now()
 	b.ResetTimer()
+	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		size := add(10, cache)
-		b.SetBytes(size)
+		for j := range deps {
+			cache.Add(t, deps[j], sizes[j])
+			b.SetBytes(sizes[j])
+		}
 	}
 }
 
 func BenchmarkAddCauseBlockCreation(b *testing.B) {
-	b.ReportAllocs()
 	cache := setup()
+	deps, sizes := genDeps(14)
+	t := time.Now()
 	b.ResetTimer()
+	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		size := add(50, cache)
-		b.SetBytes(size)
+		for j := range deps {
+			cache.Add(t, deps[j], sizes[j])
+			b.SetBytes(sizes[j])
+		}
 	}
 }
 
@@ -160,12 +102,15 @@ func BenchmarkGet(b *testing.B) {
 }
 
 func BenchmarkPut(b *testing.B) {
-	b.ReportAllocs()
 	cache := setup()
+	keys, deps, size := genBlock(14)
 	b.ResetTimer()
+	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		_, size := put(30, cache)
-		b.SetBytes(size)
+		for j := range keys {
+			cache.put(keys[j], deps, size)
+			b.SetBytes(size)
+		}
 	}
 }
 
@@ -207,13 +152,100 @@ func BenchmarkFetchParsingEachBlock(b *testing.B) {
 	}
 }
 
-func genCacheKey(tstart, tend time.Time) string {
+type TestBlockManager struct{}
+
+func (dbm TestBlockManager) CreateKey(tstart, tend time.Time) string {
 	keystart := ^uint64(0) - uint64(tstart.UnixNano())
 	keyend := ^uint64(0) - uint64(tend.UnixNano())
 	return fmt.Sprintf("%017d:%017d", keyend, keystart)
 }
 
-func genDeployment(key string) deploymentpb.Deployment {
+func (dbm TestBlockManager) ParseKey(key string) (time.Time, time.Time) {
+	k, err := strconv.ParseUint(key, 10, 64)
+	if err != nil {
+		log.Println(err)
+	}
+	t := time.Unix(0, ^int64(k))
+	return t, t
+}
+
+func (dbm TestBlockManager) CreateBlock(
+	values []*deploymentpb.Deployment,
+) []byte {
+	deployments := &deploymentpb.Deployments{Deployments: values}
+	deps, err := proto.Marshal(deployments)
+	if err != nil {
+		log.Fatalln("Failed to encode deployment:", err)
+	}
+	return deps
+}
+
+func (dbm TestBlockManager) CalculateBlockSize(
+	values []*deploymentpb.Deployment,
+) int64 {
+	deployments := &deploymentpb.Deployments{Deployments: values}
+	return int64(proto.Size(deployments))
+}
+
+func put(n int, cache *Cache[string, []byte, *deploymentpb.Deployment]) (key string, size int64) {
+	tstart := time.Now()
+	var tend time.Time
+	var deployments deploymentpb.Deployments
+	for j := 0; j < n; j++ {
+		t := tstart.Add(time.Duration(j*30) * time.Second)
+		deployment := createDeployment(createRowKey(t))
+		deployments.Deployments = append(deployments.Deployments, &deployment)
+		tend = t
+	}
+	size = int64(proto.Size(&deployments))
+	out, _ := proto.Marshal(&deployments)
+	key = createCacheKey(tstart, tend)
+	cache.put(key, out, size)
+	return
+}
+
+func add(n int, cache *Cache[string, []byte, *deploymentpb.Deployment]) int64 {
+	tstart := time.Now()
+	var tsize int64
+	for j := 0; j < n; j++ {
+		tkey := tstart.Add(time.Duration(-j*30) * time.Second)
+		deployment := createDeployment(createRowKey(tkey))
+		size := int64(proto.Size(&deployment))
+		tsize += size
+		cache.Add(tkey, &deployment, size)
+	}
+
+	return tsize
+}
+
+func genDeps(n int) ([]*deploymentpb.Deployment, []int64) {
+	var deployments []*deploymentpb.Deployment
+	var sizes []int64
+	for i := 0; i < n; i++ {
+		deployment := createDeployment(createRowKey(time.Now()))
+		deployments = append(deployments, &deployment)
+		sizes = append(sizes, int64(proto.Size(&deployment)))
+	}
+
+	return deployments, sizes
+}
+
+func genBlock(n int) ([]string, []byte, int64) {
+	tstart := time.Now()
+	var deployments deploymentpb.Deployments
+	var keys []string
+	for j := 0; j < n; j++ {
+		t := tstart.Add(time.Duration(j*30) * time.Second)
+		deployment := createDeployment(createRowKey(t))
+		deployments.Deployments = append(deployments.Deployments, &deployment)
+		keys = append(keys, createCacheKey(time.Now(), time.Now()))
+	}
+	out, _ := proto.Marshal(&deployments)
+	size := int64(proto.Size(&deployments))
+	return keys, out, size
+}
+
+func createDeployment(key string) deploymentpb.Deployment {
 	return deploymentpb.Deployment{
 		RowKey:      key,
 		Name:        "test",
@@ -225,6 +257,12 @@ func genDeployment(key string) deploymentpb.Deployment {
 	}
 }
 
-func genRowKey(t time.Time) string {
+func createRowKey(t time.Time) string {
 	return fmt.Sprintf("%d", ^uint64(0)-uint64(t.UnixNano()))
+}
+
+func createCacheKey(tstart, tend time.Time) string {
+	keystart := ^uint64(0) - uint64(tstart.UnixNano())
+	keyend := ^uint64(0) - uint64(tend.UnixNano())
+	return fmt.Sprintf("%017d:%017d", keyend, keystart)
 }
