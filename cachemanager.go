@@ -1,4 +1,4 @@
-package main
+package timecache
 
 // type CacheManager[K comparable, V any, A any] struct {
 // 	caches map[string]*Cache[K, V, A]

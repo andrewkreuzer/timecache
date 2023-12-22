@@ -1,10 +1,8 @@
-module gocache
+module github.com/andrewkreuzer/timecache
 
-go 1.20
+go 1.21.4
 
 require (
-	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da
-	google.golang.org/protobuf v1.26.0
+	github.com/golang/protobuf v1.5.3
+	google.golang.org/protobuf v1.32.0
 )
-
-require github.com/golang/protobuf v1.5.3 // indirect

@@ -1,12 +1,12 @@
-package main
+package timecache
 
 import (
 	"fmt"
-	"gocache/deploymentpb"
 	"log"
 	"strconv"
 	"time"
 
+	"github.com/andrewkreuzer/timecache/deploymentpb"
 	"google.golang.org/protobuf/proto"
 )
 

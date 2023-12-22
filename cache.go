@@ -1,4 +1,4 @@
-package main
+package timecache
 
 // #include <unistd.h>
 import "C"
@@ -173,16 +173,6 @@ func (c *Cache[K, V, A]) Add(createdAt time.Time, value A, size int64) {
 	c.activeBlock.values = append(c.activeBlock.values, value)
 	c.activeBlock.size += size
 
-	return
-}
-
-func (c *Cache[K, V, A]) put(key K, value V, size int64) {
-	entity := NewBlock[K, V](key, value, size)
-	c.entries[key] = c.ll.PushFront(entity)
-
-	c.stats.blocksAdded++
-	c.size += int64(entity.size)
-
 	for {
 		if c.ll.Len() < c.maxEntries && c.size+size < c.maxMemoryBytes {
 			return
@@ -190,6 +180,26 @@ func (c *Cache[K, V, A]) put(key K, value V, size int64) {
 
 		c.RemoveOldest()
 	}
+}
+
+func (c *Cache[K, V, A]) Put(key K, value V, size int64) {
+	c.put(key, value, size)
+	for {
+		if c.ll.Len() < c.maxEntries && c.size+size < c.maxMemoryBytes {
+			return
+		}
+		c.RemoveOldest()
+	}
+}
+
+func (c *Cache[K, V, A]) put(key K, value V, size int64) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	entity := NewBlock[K, V](key, value, size)
+	c.entries[key] = c.ll.PushFront(entity)
+
+	c.stats.blocksAdded++
+	c.size += int64(entity.size)
 }
 
 func (c *Cache[K, V, A]) Clear() {

@@ -1,13 +1,13 @@
-package main
+package timecache
 
 import (
 	"fmt"
-	"gocache/deploymentpb"
 	"log"
 	"strconv"
 	"testing"
 	"time"
 
+	"github.com/andrewkreuzer/timecache/deploymentpb"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -78,7 +78,7 @@ func BenchmarkAdd(b *testing.B) {
 	}
 }
 
-func BenchmarkAddCauseBlockCreation(b *testing.B) {
+func BenchmarkCauseBlockCreation(b *testing.B) {
 	cache := setup()
 	deps, sizes := genDeps(14)
 	t := time.Now()

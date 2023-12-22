@@ -1,4 +1,4 @@
-package main
+package timecache
 
 type ByteView struct {
 	b []byte
